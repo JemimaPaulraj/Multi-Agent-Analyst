@@ -1,0 +1,108 @@
+#!/usr/bin/env python
+"""Prophet Training Script: Preprocess → Save to Gold → Train → Evaluate."""
+import os, json, tarfile
+from pathlib import Path
+from io import StringIO
+import boto3, joblib, pandas as pd
+from prophet import Prophet
+from prophet.diagnostics import cross_validation, performance_metrics
+
+BUCKET = os.getenv("S3_BUCKET", "ticket-forecasting-lake")
+MODEL_DIR = Path(os.getenv("SM_MODEL_DIR", "/opt/ml/model"))
+s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+
+
+def preprocess():
+    """Load raw data from bronze/, process, save to gold/."""
+    print(f"[PREPROCESS] Loading from s3://{BUCKET}/bronze/")
+    files = s3.list_objects_v2(Bucket=BUCKET, Prefix="bronze/").get("Contents", [])
+    csvs = [f["Key"] for f in files if f["Key"].endswith(".csv")]
+    
+    dfs = []
+    for key in csvs:
+        print(f"  Loading: {key}")
+        temp = pd.read_csv(s3.get_object(Bucket=BUCKET, Key=key)["Body"])
+        temp.columns = temp.columns.str.lower().str.strip()
+        temp["ds"] = pd.to_datetime(temp["created_date"])
+        dfs.append(temp[["ds"]])
+    
+    # Combine and count tickets per day
+    raw = pd.concat(dfs, ignore_index=True)
+    df = raw.groupby("ds").size().reset_index(name="y")
+    df = df.sort_values("ds")
+    print(f"[PREPROCESS] Total: {len(df)} days, {len(raw)} tickets from {len(csvs)} files")
+    
+    # Save to gold/
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer, index=False)
+    s3.put_object(Bucket=BUCKET, Key="gold/processed_data.csv", Body=csv_buffer.getvalue())
+    print(f"[PREPROCESS] Saved to s3://{BUCKET}/gold/processed_data.csv")
+    
+    return df
+
+
+def evaluate(model, df, k=5, initial=30, horizon=7):
+    """Time series cross-validation with flexible data requirements."""
+    total = (df['ds'].max() - df['ds'].min()).days
+    min_required = initial + horizon + 14  # Minimum: 51 days
+    
+    if total < min_required:
+        print(f"[EVALUATE] Not enough data: {total} days (need {min_required}+). Skipping CV.")
+        return None
+    
+    # Adjust parameters based on available data
+    if total < 90:
+        initial, horizon, k = 21, 7, 3
+    elif total < 180:
+        initial, horizon, k = 30, 14, 5
+    # else use defaults: 30, 7, 5
+    
+    period = max(7, (total - initial - horizon) // max(k - 1, 1))
+    
+    try:
+        print(f"[EVALUATE] Running CV: initial={initial}d, horizon={horizon}d, period={period}d, folds={k}")
+        df_cv = cross_validation(model, initial=f'{initial} days', period=f'{period} days', horizon=f'{horizon} days')
+        m = performance_metrics(df_cv)
+        return {"mape": round(m['mape'].mean() * 100, 2), "rmse": round(m['rmse'].mean(), 2), "mae": round(m['mae'].mean(), 2)}
+    except Exception as e:
+        print(f"[EVALUATE] CV failed: {e}")
+        return None
+
+
+def train(df):
+    """Train Prophet model on processed data."""
+    print(f"[TRAIN] Training on {len(df)} days of data")
+    
+    model = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=True,
+        daily_seasonality=False,
+        changepoint_prior_scale=0.1,       # More flexible trend (default 0.05)
+        seasonality_prior_scale=5.0,       # Moderate seasonality (default 10)
+        seasonality_mode='multiplicative'  # Better for count data
+    )
+    model.fit(df)
+    
+    metrics = evaluate(model, df) or {"mape": None}
+    print(f"[TRAIN] Metrics: {metrics}")
+    
+    # Save model and metrics
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, MODEL_DIR / "model.joblib")
+    json.dump(metrics, open(MODEL_DIR / "metrics.json", "w"))
+    
+    # Upload to S3
+    with tarfile.open(MODEL_DIR / "model.tar.gz", "w:gz") as tar:
+        tar.add(MODEL_DIR / "model.joblib", arcname="model.joblib")
+        tar.add(MODEL_DIR / "metrics.json", arcname="metrics.json")
+    s3.upload_file(str(MODEL_DIR / "model.tar.gz"), BUCKET, "Model/model.tar.gz")
+    s3.upload_file(str(MODEL_DIR / "metrics.json"), BUCKET, "Model/metrics.json")
+    print(f"[TRAIN] Model saved to s3://{BUCKET}/Model/")
+
+
+if __name__ == "__main__":
+    # Step 1: Preprocess bronze → gold
+    df = preprocess()
+    
+    # Step 2: Train on processed data
+    train(df)

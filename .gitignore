@@ -1,0 +1,31 @@
+﻿# Environment
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Caches
+vectorstore/
+s3_cache/
+*.joblib
+
+# Secrets
+certs/
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Large binary files
+*.tar
+*.tar.gz

@@ -1,0 +1,29 @@
+# Core dependencies
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+langgraph>=0.2.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+typing-extensions>=4.9.0
+
+# RAG dependencies
+pypdf>=4.0.0
+tzdata>=2025.1
+
+# Database dependencies
+pymysql>=1.1.0
+
+# AWS dependencies
+boto3>=1.34.0
+langchain-aws>=0.2.0
+faiss-cpu>=1.7.0
+openai>=1.0.0
+tiktoken>=0.5.0
+
+# API & UI dependencies
+fastapi>=0.109.0
+uvicorn>=0.27.0
+streamlit>=1.31.0
+requests>=2.31.0
