@@ -10,10 +10,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from langsmith import traceable
 from langchain_core.messages import AIMessage, SystemMessage
 
-from config import llm
+from config import llm, estimate_cost, get_logger
 from state import State
+
+logger = get_logger("orchestrator")
 from schemas import OrchestratorDecision, ForecastPayload
 from forecasting import forecasting_agent
 from rag import rag_agent
@@ -24,14 +27,8 @@ from db import db_agent
 # Debug Helper
 # ---------------------------
 def debug_state(node_name: str, state: State) -> None:
-    """Print the full state for debugging."""
-    print(f"\n{'='*60}")
-    print(f"[{node_name}] STATE DEBUG")
-    print(f"{'='*60}")
-    print(f"  steps: {state.get('steps', 0)}")
-    print(f"  messages count: {len(state.get('messages', []))}")
-    print(f"  work: {json.dumps(state.get('work', {}), indent=4, default=str)}")
-    print(f"{'='*60}\n")
+    """Log the state for debugging."""
+    logger.debug(f"{node_name} | steps={state.get('steps', 0)} | messages={len(state.get('messages', []))} | work={json.dumps(state.get('work', {}), default=str)}")
 
 
 # ---------------------------
@@ -65,12 +62,11 @@ Stop when you have enough information and return FINISH with final_answer.
 Max 5 steps to prevent infinite loops.
 """)
 
-planner = llm.with_structured_output(OrchestratorDecision)
-
 
 # ---------------------------
 # Orchestrator Node
 # ---------------------------
+@traceable(name="Orchestrator")
 def orchestrator_node(state: State) -> dict:
     """Main orchestrator node that decides the next action."""
     debug_state("Orchestrator_Agent", state)
@@ -87,7 +83,6 @@ def orchestrator_node(state: State) -> dict:
         }
 
     work_json = json.dumps(work, indent=2, default=str)
-    print(f"[Orchestrator] What I have already collected (work_json): {work_json}")
 
     # Get decision from planner
     messages_to_planner = (
@@ -95,10 +90,20 @@ def orchestrator_node(state: State) -> dict:
         state["messages"] + 
         [SystemMessage(content=f"Current state.work JSON:\n{work_json}")]
     )
-    print(f"[Orchestrator] Messages to planner: {messages_to_planner}")
 
-    decision = planner.invoke(messages_to_planner)
-    print(f"[Orchestrator] Decision: {decision}")
+    response = llm.with_structured_output(OrchestratorDecision, include_raw=True).invoke(messages_to_planner)
+    decision = response["parsed"]
+    
+    # Token tracking
+    raw = response.get("raw")
+    if raw and hasattr(raw, "usage_metadata") and raw.usage_metadata:
+        usage = raw.usage_metadata
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cost = estimate_cost(input_tokens, output_tokens)
+        logger.info(f"tokens_in={input_tokens} | tokens_out={output_tokens} | cost=${cost}")
+    
+    logger.info(f"action={decision.action} | reasoning={decision.reasoning or 'N/A'}")
 
     # Format debug message
     debug_msg = (
@@ -109,7 +114,6 @@ def orchestrator_node(state: State) -> dict:
         f"rag_query={decision.rag_query}\n"
         f"db_query={decision.db_query}\n"
     )
-    print(debug_msg)
 
     # Handle FINISH action
     if decision.action == "FINISH":
@@ -155,9 +159,9 @@ def call_forecasting_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     payload = ForecastPayload(**work.get("next_forecasting_payload", {"horizon_days": 2}))
     
-    print(f"[Forecasting_Agent] Calling with payload: {payload.model_dump()}")
+    logger.info(f"Forecasting | payload={payload.model_dump()}")
     result = forecasting_agent(payload)
-    print(f"[Forecasting_Agent] Result: {json.dumps(result, indent=2)}")
+    logger.info(f"Forecasting | result_count={len(result.get('forecast', []))}")
 
     work["forecast_result"] = result
     work.pop("next_forecasting_payload", None)
@@ -176,9 +180,9 @@ def call_rag_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     query = work.get("next_rag_query", "What information do you need?")
     
-    print(f"[RAG_Agent] Calling with query: {query}")
+    logger.info(f"RAG | query={query}")
     result = rag_agent(query)
-    print(f"[RAG_Agent] Result: {json.dumps(result, indent=2)}")
+    logger.info(f"RAG | sources={len(result.get('sources', []))} | error={result.get('error', False)}")
 
     work["rag_result"] = result
     work.pop("next_rag_query", None)
@@ -197,9 +201,9 @@ def call_db_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     query = work.get("next_db_query", "Get ticket count from today till 2 days")
     
-    print(f"[Database_Agent] Calling with query: {query}")
+    logger.info(f"DB | query={query}")
     result = db_agent(query)
-    print(f"[Database_Agent] Result: {json.dumps(result, indent=2)}")
+    logger.info(f"DB | error={result.get('error', False)}")
 
     work["db_result"] = result
     work.pop("next_db_query", None)

@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from langsmith import traceable
 import boto3
 from botocore.exceptions import ClientError
 
@@ -17,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from schemas import ForecastPayload
+from config import get_logger
+
+logger = get_logger("forecasting")
 
 # Timezone Configuration
 NY_TZ = ZoneInfo("America/New_York")
@@ -47,16 +51,17 @@ def check_forecast_service():
         status = response.get("EndpointStatus", "Unknown")
         
         if status == "InService":
-            print(f"[FORECAST] SageMaker endpoint '{SAGEMAKER_ENDPOINT}' is InService")
+            logger.info(f"SageMaker endpoint '{SAGEMAKER_ENDPOINT}' is InService")
             return True
         else:
-            print(f"[FORECAST] Endpoint status: {status}")
+            logger.warning(f"Endpoint status: {status}")
             return False
     except ClientError as e:
-        print(f"[FORECAST] Cannot check endpoint: {e}")
+        logger.error(f"Cannot check endpoint: {e}")
         return False
 
 
+@traceable(name="Forecasting Agent")
 def forecasting_agent(payload: ForecastPayload) -> dict:
     """
     Forecasting Agent that calls SageMaker endpoint for predictions.
@@ -71,18 +76,15 @@ def forecasting_agent(payload: ForecastPayload) -> dict:
     
     if payload.start_date:
         start_date = payload.start_date
-        print(f"[FORECAST] Using specified start date: {start_date}")
     else:
         start_date = datetime.now(NY_TZ).date().isoformat()
-        print(f"[FORECAST] Using default start date (today): {start_date}")
     
     request_payload = {
         "horizon_days": horizon_days,
         "start_date": start_date
     }
     
-    print(f"[FORECAST] Calling SageMaker endpoint: {SAGEMAKER_ENDPOINT}")
-    print(f"[FORECAST] Payload: {request_payload}")
+    logger.info(f"Calling endpoint={SAGEMAKER_ENDPOINT} | start_date={start_date} | horizon={horizon_days}")
     
     try:
         runtime = get_sagemaker_runtime()
@@ -95,6 +97,8 @@ def forecasting_agent(payload: ForecastPayload) -> dict:
         
         result = json.loads(response["Body"].read().decode("utf-8"))
         
+        logger.info(f"Forecast returned {len(result.get('forecast', []))} predictions")
+        
         return {
             "agent": "forecasting_agent",
             "payload_received": payload.model_dump(),
@@ -106,7 +110,7 @@ def forecasting_agent(payload: ForecastPayload) -> dict:
         error_code = e.response.get("Error", {}).get("Code", "Unknown")
         error_msg = e.response.get("Error", {}).get("Message", str(e))
         
-        print(f"[FORECAST] SageMaker error ({error_code}): {error_msg}")
+        logger.error(f"SageMaker error ({error_code}): {error_msg}")
         
         return {
             "agent": "forecasting_agent",
@@ -116,7 +120,7 @@ def forecasting_agent(payload: ForecastPayload) -> dict:
         }
     
     except Exception as e:
-        print(f"[FORECAST] Unexpected error: {e}")
+        logger.error(f"Unexpected error: {e}", exc_info=True)
         return {
             "agent": "forecasting_agent",
             "payload_received": payload.model_dump(),

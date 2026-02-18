@@ -1,7 +1,8 @@
 # retrain_trigger.py
-"""Lambda: Check bronze/ for new data → Trigger training → Register → Deploy if MAPE < 15%"""
-import os, json, time
+"""Lambda: Check bronze/ for new data → Check drift → Train → Register → Deploy if MAPE < 20%"""
+import os, json, time, csv
 from datetime import datetime
+from io import StringIO
 import boto3
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -11,29 +12,92 @@ SAGEMAKER_ROLE = os.getenv("SAGEMAKER_ROLE")
 ENDPOINT_NAME = os.getenv("ENDPOINT_NAME", "prophet-fastapi-endpoint-latest")
 MODEL_PACKAGE_GROUP = os.getenv("MODEL_PACKAGE_GROUP", "prophet-forecasting-models")
 MAPE_THRESHOLD = 20.0
+DRIFT_THRESHOLD = 0.5  # 50% change = drift
 
 sm = boto3.client("sagemaker", region_name=AWS_REGION)
 s3 = boto3.client("s3", region_name=AWS_REGION)
+cloudwatch = boto3.client("cloudwatch", region_name=AWS_REGION)
+sns = boto3.client("sns", region_name=AWS_REGION)
+SNS_TOPIC_ARN = os.getenv("SNS_TOPIC_ARN", "")
+
+
+def get_new_data_stats():
+    """Compute mean of y from only NEW CSV files (uploaded after last training)."""
+    # Get last trained time
+    try:
+        last = datetime.fromisoformat(json.loads(s3.get_object(Bucket=S3_BUCKET, Key="Model/last_trained.json")["Body"].read())["trained_at"])
+    except:
+        last = datetime.min  # First run, consider all files as new
+    
+    y_values = []
+    for f in s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="bronze/").get("Contents", []):
+        if f["Key"].endswith(".csv") and f["LastModified"].replace(tzinfo=None) > last:
+            content = s3.get_object(Bucket=S3_BUCKET, Key=f["Key"])["Body"].read().decode("utf-8")
+            for row in csv.DictReader(StringIO(content)):
+                if "y" in row:
+                    y_values.append(float(row["y"]))
+    return sum(y_values) / len(y_values) if y_values else None
+
+
+def get_previous_stats():
+    """Get previous stats from S3."""
+    try:
+        return json.loads(s3.get_object(Bucket=S3_BUCKET, Key="statistics/latest.json")["Body"].read())
+    except:
+        return None
+
+
+def is_drift(new_mean, old_mean):
+    """Return True if drift detected."""
+    if not old_mean or not new_mean:
+        return False
+    return abs(new_mean - old_mean) / old_mean > DRIFT_THRESHOLD
+
+
+def save_stats(ts, y_mean):
+    """Save stats after training."""
+    stats = {"version": ts, "y_mean": y_mean, "saved_at": datetime.utcnow().isoformat()}
+    s3.put_object(Bucket=S3_BUCKET, Key=f"statistics/stats_{ts}.json", Body=json.dumps(stats))
+    s3.put_object(Bucket=S3_BUCKET, Key="statistics/latest.json", Body=json.dumps(stats))
 
 
 def has_new_data():
     """Check if any new CSV in bronze/ since last training."""
     try:
+        # Step 1 : Get last trained time
         last = datetime.fromisoformat(json.loads(s3.get_object(Bucket=S3_BUCKET, Key="Model/last_trained.json")["Body"].read())["trained_at"])
+        # Step 2 : List the meta data of all the files inside bronze/
         files = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="bronze/").get("Contents", [])
+        # Step 3 : Check if any file is updated after the last trained time
         return any(f["Key"].endswith(".csv") and f["LastModified"].replace(tzinfo=None) > last for f in files)
+        # Output : True if there is any file updated after the last trained time, False otherwise
     except:
-        return True
+        return True # First run, consider all files as new
 
 
 def lambda_handler(event, context):
-    """Check for new data, trigger training (train script does all processing)."""
+    """Check for new data → Check drift → Train → Register → Deploy."""
     
     if not has_new_data():
         return {"status": "skipped", "reason": "no_new_data"}
     
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     job_name = f"prophet-retrain-{ts}"
+    
+    # 0. Check drift
+    new_y_mean = get_new_data_stats()
+    old_stats = get_previous_stats()
+    old_y_mean = old_stats["y_mean"] if old_stats else None
+    
+    # 0. Check drift (alert only, don't stop training)
+    if is_drift(new_y_mean, old_y_mean):
+        cloudwatch.put_metric_data(Namespace="MLOps", MetricData=[{"MetricName": "DataDrift", "Value": 1}])
+        if SNS_TOPIC_ARN:
+            sns.publish(
+                TopicArn=SNS_TOPIC_ARN,
+                Subject="Data Drift Detected",
+                Message=f"Data drift detected. New mean: {new_y_mean:.1f}, Old mean: {old_y_mean:.1f}. Training will continue. Monitor MAPE closely."
+            )
     
     # 1. Create Model Package Group (if not exists)
     try:
@@ -70,6 +134,14 @@ def lambda_handler(event, context):
         metrics = {}
     mape = metrics.get("mape")
     approval = "Approved" if mape and mape < MAPE_THRESHOLD else "PendingManualApproval"
+    
+    # Alert if manual approval needed
+    if approval == "PendingManualApproval" and SNS_TOPIC_ARN:
+        sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject="Model Needs Manual Approval",
+            Message=f"New model exceeded MAPE threshold. MAPE: {mape}%, Threshold: {MAPE_THRESHOLD}%. Please review and approve manually."
+        )
     
     # 5. Register in Model Registry
     pkg_params = {
@@ -131,7 +203,9 @@ def lambda_handler(event, context):
             # Endpoint doesn't exist, create it
             sm.create_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=f"prophet-cfg-{ts}")
     
-    # 7. Save metadata
+    # 7. Save metadata + stats
     s3.put_object(Bucket=S3_BUCKET, Key="Model/last_trained.json", Body=json.dumps({"trained_at": datetime.utcnow().isoformat(), "mape": mape, "approval": approval}))
+    if new_y_mean:
+        save_stats(ts, new_y_mean)
     
     return {"status": "success", "job": job_name, "mape": mape, "approval": approval, "deployed": approval == "Approved"}

@@ -10,11 +10,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from langsmith import traceable
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 
-from config import llm
+from config import llm, get_logger
+
+logger = get_logger("db")
 
 # Database configuration from environment variables
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1:3306")
@@ -30,7 +33,7 @@ def configure_db():
     """Configure and return SQLDatabase connection."""
     
     if _state["db"] is not None:
-        print("[DB] Using existing database connection")
+        logger.debug("Using existing database connection")
         return _state["db"]
     
     # Handle host:port format (e.g., "127.0.0.1:3306")
@@ -40,14 +43,14 @@ def configure_db():
         host, port = DB_HOST.split(":")
     
     db_uri = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{host}:{port}/{DB_NAME}"
-    print(f"[DB] Connecting to: mysql+pymysql://{DB_USER}:***@{host}:{port}/{DB_NAME}")
+    logger.info(f"Connecting to: mysql+pymysql://{DB_USER}:***@{host}:{port}/{DB_NAME}")
     
     try:
         _state["db"] = SQLDatabase.from_uri(db_uri)
-        print(f"[DB] Connected to MySQL database: {DB_NAME}")
+        logger.info(f"Connected to MySQL database: {DB_NAME}")
         return _state["db"]
     except Exception as e:
-        print(f"[DB] Failed to connect: {e}")
+        logger.error(f"Failed to connect: {e}")
         return None
 
 
@@ -55,7 +58,7 @@ def get_sql_agent():
     """Create and return SQL agent."""
     
     if _state["agent"] is not None:
-        print("[DB] Using existing SQL agent")
+        logger.debug("Using existing SQL agent")
         return _state["agent"]
     
     db = configure_db()
@@ -81,10 +84,11 @@ def get_sql_agent():
         agent_executor_kwargs={"handle_parsing_errors": True}
     )
     
-    print("[DB] SQL agent created")
+    logger.info("SQL agent created")
     return _state["agent"]
 
 
+@traceable(name="DB Agent")
 def db_agent(query: str) -> dict:
     """
     DB Querying Agent that uses SQL agent to query MySQL database.
