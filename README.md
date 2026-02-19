@@ -4,30 +4,8 @@ A modular multi-agent system built with LangGraph that orchestrates between spec
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      ORCHESTRATOR                           │
-│                                                             │
-│  Decides which agent to call based on the user's query      │
-│  - CALL_RAG         → RAG Agent                             │
-│  - CALL_DB          → DB Agent                              │
-│  - CALL_FORECASTING → Forecasting Agent                     │
-│  - FINISH           → Return final answer                   │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-        ▼              ▼              ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│   RAG AGENT   │ │   DB AGENT    │ │  FORECASTING  │
-│               │ │               │ │     AGENT     │
-│ - Knowledge   │ │ - Ticket      │ │               │
-│   questions   │ │   statistics  │ │ - Future      │
-│ - Definitions │ │ - Historical  │ │   predictions │
-│ - Explanations│ │   data        │ │ - Trend       │
-│               │ │ - Counts      │ │   analysis    │
-└───────────────┘ └───────────────┘ └───────────────┘
-```
+<img width="1288" height="1160" alt="image" src="https://github.com/user-attachments/assets/c68a3a32-c549-4057-bbe6-ac0995a6a998" />
+
 
 ## Project Structure
 
