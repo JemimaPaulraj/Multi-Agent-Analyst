@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from langsmith import traceable
 from langchain_core.messages import AIMessage, SystemMessage
 
-from config import llm, estimate_cost, get_logger
+import time
+from config import llm, get_logger, log_agent_metrics
 from state import State
 
 logger = get_logger("orchestrator")
@@ -70,6 +71,7 @@ Max 5 steps to prevent infinite loops.
 def orchestrator_node(state: State) -> dict:
     """Main orchestrator node that decides the next action."""
     debug_state("Orchestrator_Agent", state)
+    start_time = time.time()
     
     work = state.get("work", {})
     steps = state.get("steps", 0)
@@ -94,15 +96,16 @@ def orchestrator_node(state: State) -> dict:
     response = llm.with_structured_output(OrchestratorDecision, include_raw=True).invoke(messages_to_planner)
     decision = response["parsed"]
     
-    # Token tracking
+    # Extract token usage and log per-agent metrics
     raw = response.get("raw")
+    tokens_in, tokens_out = 0, 0
     if raw and hasattr(raw, "usage_metadata") and raw.usage_metadata:
-        usage = raw.usage_metadata
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cost = estimate_cost(input_tokens, output_tokens)
-        logger.info(f"tokens_in={input_tokens} | tokens_out={output_tokens} | cost=${cost}")
+        tokens_in = raw.usage_metadata.get("input_tokens", 0)
+        tokens_out = raw.usage_metadata.get("output_tokens", 0)
     
+    log_agent_metrics("orchestrator", round((time.time() - start_time) * 1000), tokens_in, tokens_out)
+    
+    # Log orchestrator decision (text only)
     logger.info(f"action={decision.action} | reasoning={decision.reasoning or 'N/A'}")
 
     # Format debug message
@@ -155,6 +158,7 @@ def orchestrator_node(state: State) -> dict:
 def call_forecasting_node(state: State) -> dict:
     """Node that calls the Forecasting Agent."""
     debug_state("Forecasting_Agent", state)
+    start_time = time.time()
     
     work = dict(state.get("work", {}))
     payload = ForecastPayload(**work.get("next_forecasting_payload", {"horizon_days": 2}))
@@ -162,6 +166,8 @@ def call_forecasting_node(state: State) -> dict:
     logger.info(f"Forecasting | payload={payload.model_dump()}")
     result = forecasting_agent(payload)
     logger.info(f"Forecasting | result_count={len(result.get('forecast', []))}")
+    
+    log_agent_metrics("forecasting", round((time.time() - start_time) * 1000))
 
     work["forecast_result"] = result
     work.pop("next_forecasting_payload", None)
@@ -176,6 +182,7 @@ def call_forecasting_node(state: State) -> dict:
 def call_rag_node(state: State) -> dict:
     """Node that calls the RAG Agent."""
     debug_state("RAG_Agent", state)
+    start_time = time.time()
     
     work = dict(state.get("work", {}))
     query = work.get("next_rag_query", "What information do you need?")
@@ -183,6 +190,8 @@ def call_rag_node(state: State) -> dict:
     logger.info(f"RAG | query={query}")
     result = rag_agent(query)
     logger.info(f"RAG | sources={len(result.get('sources', []))} | error={result.get('error', False)}")
+    
+    log_agent_metrics("rag", round((time.time() - start_time) * 1000))
 
     work["rag_result"] = result
     work.pop("next_rag_query", None)
@@ -197,6 +206,7 @@ def call_rag_node(state: State) -> dict:
 def call_db_node(state: State) -> dict:
     """Node that calls the DB Agent."""
     debug_state("Database_Agent", state)
+    start_time = time.time()
     
     work = dict(state.get("work", {}))
     query = work.get("next_db_query", "Get ticket count from today till 2 days")
@@ -204,6 +214,8 @@ def call_db_node(state: State) -> dict:
     logger.info(f"DB | query={query}")
     result = db_agent(query)
     logger.info(f"DB | error={result.get('error', False)}")
+    
+    log_agent_metrics("db", round((time.time() - start_time) * 1000))
 
     work["db_result"] = result
     work.pop("next_db_query", None)

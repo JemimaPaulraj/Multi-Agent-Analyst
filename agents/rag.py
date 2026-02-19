@@ -21,6 +21,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from config import llm, get_logger
+from semantic_cache import check_cache, save_to_cache
 
 logger = get_logger("rag")
 
@@ -143,9 +144,24 @@ def create_vectorstore():
 
 @traceable(name="RAG Agent")
 def rag_agent(query: str) -> dict:
-    """Use vectorstore to answer query."""
+    """Use vectorstore to answer query with semantic caching."""
     
     try:
+        # Step 1: Check semantic cache first
+        cached = check_cache(query)
+        if cached:
+            logger.info(f"CACHE HIT | similarity={cached['similarity']} | similar_query={cached['similar_query'][:50]}...")
+            return {
+                "agent": "rag_agent",
+                "query": query,
+                "answer": cached["answer"],
+                "sources": cached["sources"],
+                "cached": True
+            }
+        
+        # Step 2: Cache miss - do full RAG
+        logger.info("CACHE MISS | Running full RAG pipeline")
+        
         vectorstore = get_vectorstore()
         if vectorstore is None:
             vectorstore = create_vectorstore()
@@ -158,7 +174,7 @@ def rag_agent(query: str) -> dict:
                 "sources": []
             }
         
-        # Retrieve with scores (scores visible in LangSmith)
+        # Retrieve with scores
         docs_with_scores = vectorstore.similarity_search_with_score(query, k=4)
         docs = [doc for doc, _ in docs_with_scores]
         context = "\n\n".join([doc.page_content for doc in docs])
@@ -174,11 +190,16 @@ def rag_agent(query: str) -> dict:
             for d in docs
         ]
         
+        # Step 3: Save to cache (includes contexts for RAGAS evaluation)
+        contexts = [doc.page_content for doc in docs]
+        save_to_cache(query, answer, contexts, sources)
+        
         return {
             "agent": "rag_agent",
             "query": query,
             "answer": answer,
-            "sources": sources
+            "sources": sources,
+            "cached": False
         }
         
     except Exception as e:

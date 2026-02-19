@@ -1,8 +1,12 @@
 """
 FastAPI backend for the Multi-Agent Analyst system.
+
+Observability Strategy:
+- CloudWatch Logs: request_id, session_id, user_query, llm_response, errors, stack traces
+- CloudWatch Metrics: latency, tokens_in, tokens_out, cost, steps, request_count, error_count
+- LangSmith: Full LLM tracing (via @traceable decorator)
 """
 
-import logging
 import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -11,7 +15,15 @@ from langsmith import traceable
 
 from state import State
 from graph import app as langgraph_app
-from agents.config import get_logger, log_metrics, estimate_cost
+from agents.config import (
+    get_logger, 
+    log_metrics, 
+    estimate_cost,
+    generate_request_id,
+    log_request,
+    log_response,
+    log_error
+)
 
 logger = get_logger("api")
 
@@ -88,22 +100,42 @@ def process_query(request: QueryRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
     rate_limit(request.session_id)
+    
+    # Generate unique request ID for tracing this specific request
+    request_id = generate_request_id()
     start = time.time()
+    
+    # Log request to CloudWatch Logs (text data for debugging)
+    log_request(
+        logger=logger,
+        request_id=request_id,
+        session_id=request.session_id,
+        user_query=request.query
+    )
     
     try:
         result = run_multi_agent(request.query, request.session_id)
         messages = result.get("messages", [])
         final_answer = messages[-1].content if messages else "No response generated"
         
-        # Get metrics
+        # Get token counts from work
         work = result.get("work", {})
         tokens_in = work.get("tokens_in", 0)
         tokens_out = work.get("tokens_out", 0)
+        latency_ms = round((time.time() - start) * 1000)
         
-        # Log structured metrics to CloudWatch
+        # Log response to CloudWatch Logs (text data for debugging)
+        log_response(
+            logger=logger,
+            request_id=request_id,
+            session_id=request.session_id,
+            llm_response=final_answer,
+            status="success"
+        )
+        
+        # Log numerical metrics to CloudWatch Metrics (for dashboards/alarms)
         log_metrics(
-            session=request.session_id,
-            latency_ms=round((time.time() - start) * 1000),
+            latency_ms=latency_ms,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=estimate_cost(tokens_in, tokens_out),
@@ -118,7 +150,13 @@ def process_query(request: QueryRequest):
         )
     
     except Exception as e:
-        logger.error(f"Query failed | session={request.session_id} | error={str(e)}")
+        # Log error to CloudWatch Logs (with stack trace) AND increment error metric
+        log_error(
+            logger=logger,
+            request_id=request_id,
+            session_id=request.session_id,
+            error_message=str(e)
+        )
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
 
