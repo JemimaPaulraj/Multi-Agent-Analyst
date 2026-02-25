@@ -44,17 +44,19 @@ if not getattr(logging.root, '_cw_configured', False):
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     
-    # CloudWatch handler - use stream_name to group all logs together
-    logs_client = boto3.client("logs", region_name=AWS_REGION)
-    cloudwatch_handler = watchtower.CloudWatchLogHandler(
-        log_group="multi-agent-analyst",
-        stream_name="app-{strftime:%Y-%m-%d}",
-        boto3_client=logs_client,
-        create_log_group=True,
-        use_queues=False  # Synchronous - more reliable delivery
-    )
-    # Add to root logger so ALL loggers inherit it
-    logging.root.addHandler(cloudwatch_handler)
+    # CloudWatch handler only when AWS credentials available (skip in CI / local test)
+    try:
+        logs_client = boto3.client("logs", region_name=AWS_REGION)
+        cloudwatch_handler = watchtower.CloudWatchLogHandler(
+            log_group_name="multi-agent-analyst",
+            log_stream_name="app-{strftime:%Y-%m-%d}",
+            boto3_client=logs_client,
+            create_log_group=True,
+            use_queues=False
+        )
+        logging.root.addHandler(cloudwatch_handler)
+    except Exception:
+        pass  # No credentials (e.g. CI) or AWS unavailable: use console logging only
     logging.root._cw_configured = True
 
 def get_logger(name: str):
