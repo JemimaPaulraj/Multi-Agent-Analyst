@@ -1,12 +1,39 @@
 """
-Test that the orchestrator routes queries to the correct agent node.
-Uses a mocked LLM so the routing decision is predictable.
+Tests for Multi-Agent Analyst: API (health) and orchestrator routing.
 """
+import sys
+from pathlib import Path
 from unittest.mock import patch
+
+# Add project root so we can import main, schemas, agents
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
 
+from main import app
 from schemas import OrchestratorDecision, ForecastPayload
 from agents.orchestrator import orchestrator_node
+
+client = TestClient(app)
+
+
+# ----- API tests -----
+
+
+def test_health():
+    """Health check returns 200 and expected body."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "running" in data["message"].lower()
+
+
+# ----- Orchestrator routing tests -----
+
 
 def _make_state(query: str, work: dict | None = None, steps: int = 0) -> dict:
     return {
@@ -16,7 +43,7 @@ def _make_state(query: str, work: dict | None = None, steps: int = 0) -> dict:
         "request_id": "test-req",
     }
 
-# @patch is used in tests temporarily replace the real object.
+
 @patch("agents.orchestrator.log_agent_metrics")
 @patch("agents.orchestrator.add_event")
 @patch("agents.orchestrator.llm")
