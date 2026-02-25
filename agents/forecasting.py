@@ -4,9 +4,7 @@ Calls AWS SageMaker endpoint for predictions.
 """
 
 import os
-import sys
 import json
-from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -14,11 +12,8 @@ from langsmith import traceable
 import boto3
 from botocore.exceptions import ClientError
 
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from schemas import ForecastPayload
-from config import get_logger
+from agents.config import get_logger
 
 logger = get_logger("forecasting")
 

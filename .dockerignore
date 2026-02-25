@@ -1,0 +1,40 @@
+# Git and IDE
+.git
+.gitignore
+.venv
+venv
+env
+.pytest_cache
+.cursor
+.vscode
+.idea
+*.md
+!README.md
+
+# Tests and eval (not needed in runtime image)
+tests
+eval
+__pycache__
+*.pyc
+*.pyo
+
+# Lambda and model (separate deployables)
+lambda
+model_folder
+
+# Data and caches
+s3_cache
+*.pdf
+
+# Env files (secrets go via runtime env, not image)
+.env
+.env.*
+
+# CI/CD (no need inside image)
+.github
+
+# Misc
+*.log
+.DS_Store
+agents/Untitled
+Untitled

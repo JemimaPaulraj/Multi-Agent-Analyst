@@ -26,10 +26,39 @@ import traceback
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 METRICS_NAMESPACE = "MultiAgentAnalyst"
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
-logging.root.addHandler(watchtower.CloudWatchLogHandler(log_group="multi-agent-analyst"))
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="watchtower")
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Only setup logging once
+if not getattr(logging.root, '_cw_configured', False):
+    logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s | %(name)s | %(levelname)s | %(message)s')
+    
+    # Suppress noisy library logs (only show our app logs)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("faiss").setLevel(logging.WARNING)
+    logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+    logging.getLogger("langchain_aws").setLevel(logging.WARNING)
+    logging.getLogger("langchain_aws.chat_models.bedrock_converse").setLevel(logging.WARNING)
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    
+    # CloudWatch handler - use stream_name to group all logs together
+    logs_client = boto3.client("logs", region_name=AWS_REGION)
+    cloudwatch_handler = watchtower.CloudWatchLogHandler(
+        log_group="multi-agent-analyst",
+        stream_name="app-{strftime:%Y-%m-%d}",
+        boto3_client=logs_client,
+        create_log_group=True,
+        use_queues=False  # Synchronous - more reliable delivery
+    )
+    # Add to root logger so ALL loggers inherit it
+    logging.root.addHandler(cloudwatch_handler)
+    logging.root._cw_configured = True
 
 def get_logger(name: str):
+    """Get a logger - inherits CloudWatch handler from root."""
     return logging.getLogger(name)
 
 
@@ -41,14 +70,80 @@ def generate_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:12]}"
 
 
-def log_metrics(latency_ms: int, tokens_in: int, tokens_out: int, cost_usd: float, steps: int, agent_name: str = None):
+# ---------------------------
+# Request Context (Single JSON blob per request)
+# ---------------------------
+_request_context = {}
+
+def start_request(request_id: str, session_id: str, user_query: str):
+    """Start collecting events for a request."""
+    _request_context[request_id] = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "user_query": user_query,
+        "agent_flow": [],
+    }
+
+def add_event(request_id: str, **kwargs):
+    """Add event data to the request context."""
+    if request_id in _request_context:
+        ctx = _request_context[request_id]
+        
+        # Track agent flow and per-agent metrics
+        if "agent" in kwargs:
+            agent_name = kwargs.pop("agent")
+            ctx["agent_flow"].append(agent_name)
+            
+            # If agent metrics provided, store/accumulate them per-agent
+            if "agent_metrics" in kwargs:
+                metrics = kwargs.pop("agent_metrics")
+                if "agents" not in ctx:
+                    ctx["agents"] = {}
+                
+                if agent_name in ctx["agents"]:
+                    # Accumulate metrics for agents called multiple times (e.g., orchestrator)
+                    existing = ctx["agents"][agent_name]
+                    existing["latency_sec"] = round(existing.get("latency_sec", 0) + metrics.get("latency_sec", 0), 3)
+                    existing["tokens_in"] += metrics.get("tokens_in", 0)
+                    existing["tokens_out"] += metrics.get("tokens_out", 0)
+                    existing["cost_usd"] += metrics.get("cost_usd", 0)
+                    existing["calls"] = existing.get("calls", 1) + 1
+                else:
+                    metrics["calls"] = 1
+                    ctx["agents"][agent_name] = metrics
+        
+        # Only keep first values for these fields (don't overwrite)
+        for key in ["orchestrator_decision", "rag_query", "db_query", "forecasting_payload"]:
+            if key in kwargs:
+                if key not in ctx:
+                    ctx[key] = kwargs.pop(key)
+                else:
+                    kwargs.pop(key)
+        
+        # Update remaining fields
+        ctx.update(kwargs)
+
+def end_request(request_id: str, llm_response: str, status: str = "success"):
+    """Log the complete request as one JSON blob and cleanup."""
+    if request_id not in _request_context:
+        return
+    
+    ctx = _request_context.pop(request_id)
+    ctx["llm_response"] = llm_response
+    ctx["status"] = status
+    
+    logger = get_logger("request")
+    logger.info(json.dumps(ctx))
+
+
+def log_metrics(latency_sec: float, tokens_in: int, tokens_out: int, cost_usd: float, steps: int, agent_name: str = None):
     """
     Send numerical metrics to CloudWatch Metrics.
     
     These are for dashboards and alarms - NOT for debugging text.
     """
     metric_data = [
-        {"MetricName": "Latency", "Value": latency_ms, "Unit": "Milliseconds"},
+        {"MetricName": "Latency", "Value": latency_sec, "Unit": "Seconds"},
         {"MetricName": "TokensIn", "Value": tokens_in, "Unit": "Count"},
         {"MetricName": "TokensOut", "Value": tokens_out, "Unit": "Count"},
         {"MetricName": "Cost", "Value": cost_usd * 1000000, "Unit": "Count"},
@@ -74,7 +169,7 @@ def log_error_metric(agent_name: str = None):
     cloudwatch.put_metric_data(Namespace=METRICS_NAMESPACE, MetricData=metric_data)
 
 
-def log_agent_metrics(agent_name: str, latency_ms: int, tokens_in: int = 0, tokens_out: int = 0):
+def log_agent_metrics(agent_name: str, latency_sec: float, tokens_in: int = 0, tokens_out: int = 0):
     """
     Log per-agent metrics to CloudWatch with Agent dimension.
     
@@ -85,7 +180,7 @@ def log_agent_metrics(agent_name: str, latency_ms: int, tokens_in: int = 0, toke
     cloudwatch.put_metric_data(
         Namespace=METRICS_NAMESPACE,
         MetricData=[
-            {"MetricName": "Latency", "Value": latency_ms, "Unit": "Milliseconds", 
+            {"MetricName": "Latency", "Value": latency_sec, "Unit": "Seconds", 
              "Dimensions": [{"Name": "Agent", "Value": agent_name}]},
             {"MetricName": "TokensIn", "Value": tokens_in, "Unit": "Count",
              "Dimensions": [{"Name": "Agent", "Value": agent_name}]},
@@ -226,7 +321,6 @@ logger = get_logger("config")
 # ---------------------------
 # AWS Bedrock Configuration
 # ---------------------------
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
 
 # Guardrails Configuration
@@ -246,25 +340,26 @@ def estimate_cost(input_tokens: int, output_tokens: int) -> float:
     return round(input_cost + output_cost, 6)
 
 
-# Create LLM with or without guardrails
-if GUARDRAIL_ID and ENABLE_GUARDRAILS:
-    logger.info(f"Guardrails ENABLED: {GUARDRAIL_ID} (v{GUARDRAIL_VERSION})")
-    llm = ChatBedrock(
-        model_id=BEDROCK_MODEL_ID,
-        region_name=AWS_REGION,
-        model_kwargs={"temperature": 0},
-        guardrails={
-            "guardrailIdentifier": GUARDRAIL_ID,
-            "guardrailVersion": GUARDRAIL_VERSION,
-            "trace": "enabled"
-        }
-    )
+# Create LLM with or without guardrails (only once)
+llm = None
+if not hasattr(logging.root, '_llm_instance'):
+    if GUARDRAIL_ID and ENABLE_GUARDRAILS:
+        llm = ChatBedrock(
+            model_id=BEDROCK_MODEL_ID,
+            region_name=AWS_REGION,
+            model_kwargs={"temperature": 0},
+            guardrails={
+                "guardrailIdentifier": GUARDRAIL_ID,
+                "guardrailVersion": GUARDRAIL_VERSION,
+                "trace": "enabled"
+            }
+        )
+    else:
+        llm = ChatBedrock(
+            model_id=BEDROCK_MODEL_ID,
+            region_name=AWS_REGION,
+            model_kwargs={"temperature": 0}
+        )
+    logging.root._llm_instance = llm
 else:
-    logger.info("Guardrails DISABLED")
-    llm = ChatBedrock(
-        model_id=BEDROCK_MODEL_ID,
-        region_name=AWS_REGION,
-        model_kwargs={"temperature": 0}
-    )
-
-logger.info(f"LLM initialized: {BEDROCK_MODEL_ID}")
+    llm = getattr(logging.root, '_llm_instance', None)

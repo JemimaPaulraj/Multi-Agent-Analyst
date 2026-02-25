@@ -1,4 +1,4 @@
-﻿# Environment
+# Environment
 .env
 .venv/
 venv/
@@ -11,8 +11,10 @@ __pycache__/
 *.swp
 
 # Caches
+FAISS_Vectorstore/
 vectorstore/
 s3_cache/
+cache_index/
 *.joblib
 
 # Secrets

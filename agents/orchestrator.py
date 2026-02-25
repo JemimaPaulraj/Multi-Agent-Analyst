@@ -3,25 +3,20 @@ Orchestrator Agent module.
 Coordinates between RAG, DB, and Forecasting agents.
 """
 
-import sys
 import json
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import time
 
 from langsmith import traceable
 from langchain_core.messages import AIMessage, SystemMessage
 
-import time
-from config import llm, get_logger, log_agent_metrics
+from agents.config import llm, get_logger, log_agent_metrics, add_event, estimate_cost
 from state import State
+from schemas import OrchestratorDecision, ForecastPayload
+from agents.forecasting import forecasting_agent
+from agents.rag import rag_agent
+from agents.db import db_agent
 
 logger = get_logger("orchestrator")
-from schemas import OrchestratorDecision, ForecastPayload
-from forecasting import forecasting_agent
-from rag import rag_agent
-from db import db_agent
 
 
 # ---------------------------
@@ -64,7 +59,7 @@ Max 5 steps to prevent infinite loops.
 """)
 
 
-# ---------------------------
+# ------------------------------------------------------------------------------------------------#
 # Orchestrator Node
 # ---------------------------
 @traceable(name="Orchestrator")
@@ -103,10 +98,35 @@ def orchestrator_node(state: State) -> dict:
         tokens_in = raw.usage_metadata.get("input_tokens", 0)
         tokens_out = raw.usage_metadata.get("output_tokens", 0)
     
-    log_agent_metrics("orchestrator", round((time.time() - start_time) * 1000), tokens_in, tokens_out)
+    latency_sec = round((time.time() - start_time), 3)
+    cost_usd = estimate_cost(tokens_in, tokens_out)
     
-    # Log orchestrator decision (text only)
-    logger.info(f"action={decision.action} | reasoning={decision.reasoning or 'N/A'}")
+    # Accumulate tokens in work for total tracking
+    work["tokens_in"] = work.get("tokens_in", 0) + tokens_in
+    work["tokens_out"] = work.get("tokens_out", 0) + tokens_out
+    
+    log_agent_metrics("orchestrator", latency_sec, tokens_in, tokens_out)
+    
+    # Add to request context (single JSON blob) with per-agent metrics
+    request_id = state.get("request_id")
+    if request_id:
+        event_data = {
+            "agent": "orchestrator", 
+            "orchestrator_decision": decision.action,
+            "agent_metrics": {
+                "latency_sec": latency_sec,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd
+            }
+        }
+        if decision.rag_query:
+            event_data["rag_query"] = decision.rag_query
+        if decision.db_query:
+            event_data["db_query"] = decision.db_query
+        if decision.forecasting_payload:
+            event_data["forecasting_payload"] = decision.forecasting_payload.model_dump()
+        add_event(request_id, **event_data)
 
     # Format debug message
     debug_msg = (
@@ -163,11 +183,25 @@ def call_forecasting_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     payload = ForecastPayload(**work.get("next_forecasting_payload", {"horizon_days": 2}))
     
-    logger.info(f"Forecasting | payload={payload.model_dump()}")
     result = forecasting_agent(payload)
-    logger.info(f"Forecasting | result_count={len(result.get('forecast', []))}")
     
-    log_agent_metrics("forecasting", round((time.time() - start_time) * 1000))
+    latency_sec = round((time.time() - start_time), 3)
+    log_agent_metrics("forecasting", latency_sec)
+    
+    # Add to request context (single JSON blob) with per-agent metrics
+    request_id = state.get("request_id")
+    if request_id:
+        add_event(
+            request_id, 
+            agent="forecasting", 
+            forecast_days=len(result.get("forecast", [])),
+            agent_metrics={
+                "latency_sec": latency_sec,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost_usd": 0
+            }
+        )
 
     work["forecast_result"] = result
     work.pop("next_forecasting_payload", None)
@@ -187,11 +221,36 @@ def call_rag_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     query = work.get("next_rag_query", "What information do you need?")
     
-    logger.info(f"RAG | query={query}")
     result = rag_agent(query)
-    logger.info(f"RAG | sources={len(result.get('sources', []))} | error={result.get('error', False)}")
     
-    log_agent_metrics("rag", round((time.time() - start_time) * 1000))
+    # Accumulate RAG tokens in work (only if not cached)
+    rag_tokens_in = result.get("tokens_in", 0)
+    rag_tokens_out = result.get("tokens_out", 0)
+    work["tokens_in"] = work.get("tokens_in", 0) + rag_tokens_in
+    work["tokens_out"] = work.get("tokens_out", 0) + rag_tokens_out
+    
+    latency_sec = round((time.time() - start_time), 3)
+    cost_usd = estimate_cost(rag_tokens_in, rag_tokens_out)
+    
+    log_agent_metrics("rag", latency_sec, rag_tokens_in, rag_tokens_out)
+    
+    # Add to request context (single JSON blob) with per-agent metrics
+    request_id = state.get("request_id")
+    if request_id:
+        event_data = {
+            "agent": "rag",
+            "cache_hit": result.get("cached", False),
+            "sources": result.get("sources", []),
+            "agent_metrics": {
+                "latency_sec": latency_sec,
+                "tokens_in": rag_tokens_in,
+                "tokens_out": rag_tokens_out,
+                "cost_usd": cost_usd
+            }
+        }
+        if result.get("cache_similarity"):
+            event_data["cache_similarity"] = result.get("cache_similarity")
+        add_event(request_id, **event_data)
 
     work["rag_result"] = result
     work.pop("next_rag_query", None)
@@ -211,11 +270,25 @@ def call_db_node(state: State) -> dict:
     work = dict(state.get("work", {}))
     query = work.get("next_db_query", "Get ticket count from today till 2 days")
     
-    logger.info(f"DB | query={query}")
     result = db_agent(query)
-    logger.info(f"DB | error={result.get('error', False)}")
     
-    log_agent_metrics("db", round((time.time() - start_time) * 1000))
+    latency_sec = round((time.time() - start_time), 3)
+    log_agent_metrics("db", latency_sec)
+    
+    # Add to request context (single JSON blob) with per-agent metrics
+    request_id = state.get("request_id")
+    if request_id:
+        add_event(
+            request_id, 
+            agent="db", 
+            db_error=result.get("error", False),
+            agent_metrics={
+                "latency_sec": latency_sec,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost_usd": 0
+            }
+        )
 
     work["db_result"] = result
     work.pop("next_db_query", None)

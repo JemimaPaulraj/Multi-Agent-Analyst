@@ -4,18 +4,13 @@ Uses SQL Agent to query MySQL database.
 """
 
 import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from langsmith import traceable
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 
-from config import llm, get_logger
+from agents.config import llm, get_logger
 
 logger = get_logger("db")
 

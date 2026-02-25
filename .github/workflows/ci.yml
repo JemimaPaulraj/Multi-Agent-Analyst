@@ -1,0 +1,28 @@
+#Name of the workflow
+name: CI
+
+# This should run when a push or pull request is made to the main or master branch
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test: #task 1
+    runs-on: ubuntu-latest # GitHub creates a temporary Ubuntu virtual machine, runs your code there and delte it after completion.
+    steps: # Actual task
+      - uses: actions/checkout@v4 # Clone your GitHub repo into the runner machine, so that VM can have your project files.
+
+      - name: Set up Python # Installs Python 3.10 in the VM.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies # Installs the dependencies from the requirements.txt file.
+        run: | # Runs a shell command in the VM.
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v #Run all test files inside tests/, -v = verbose (show detailed output)

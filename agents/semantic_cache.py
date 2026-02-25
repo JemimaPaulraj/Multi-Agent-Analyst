@@ -1,139 +1,134 @@
 """
 Semantic Cache using FAISS + DynamoDB
-- FAISS: Stores query embeddings for similarity search
-- DynamoDB: Stores the actual cached answers
+
+- FAISS: Stores query embeddings for similarity search (finds similar questions)
+- DynamoDB: Stores the actual cached answers (retrieves the answer)
+
+Flow:
+1. User asks a question
+2. Check FAISS for similar questions (semantic search)
+3. If similar found → Get answer from DynamoDB (cache hit)
+4. If not found → Return None (cache miss)
 """
 
 import os
 import hashlib
 import time
+import json
 from pathlib import Path
 import boto3
-from botocore.exceptions import ClientError
+from boto3.dynamodb.types import TypeDeserializer
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 
+# Configuration
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 DYNAMODB_TABLE = os.getenv("CACHE_TABLE", "rag-semantic-cache")
-SIMILARITY_THRESHOLD = 0.92
+SIMILARITY_THRESHOLD = 0.85  # How similar queries must be (0-1)
 CACHE_TTL_HOURS = 24
 
-CACHE_INDEX_DIR = Path(__file__).resolve().parent.parent / "cache_index"
-_cache_state = {"faiss": None, "dynamodb": None, "embeddings": None}
+# Storage paths
+CACHE_INDEX_DIR = Path(__file__).resolve().parent.parent / "FAISS_Vectorstore" / "Cache_index"
 
-
-def _get_dynamodb():
-    if _cache_state["dynamodb"] is None:
-        _cache_state["dynamodb"] = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE)
-    return _cache_state["dynamodb"]
-
-
-def _get_embeddings():
-    if _cache_state["embeddings"] is None:
-        _cache_state["embeddings"] = OpenAIEmbeddings()
-    return _cache_state["embeddings"]
-
-
-def _get_cache_index():
-    """Load or create FAISS cache index."""
-    if _cache_state["faiss"] is not None:
-        return _cache_state["faiss"]
-    
-    index_path = CACHE_INDEX_DIR / "index.faiss"
-    if index_path.exists():
-        _cache_state["faiss"] = FAISS.load_local(
-            str(CACHE_INDEX_DIR), _get_embeddings(), allow_dangerous_deserialization=True
-        )
-    return _cache_state["faiss"]
-
-
-def _save_cache_index(index):
-    """Save FAISS cache index to disk."""
-    CACHE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    index.save_local(str(CACHE_INDEX_DIR))
-    _cache_state["faiss"] = index
-
-
-def get_cache_key(query: str) -> str:
-    """Generate cache key from query."""
-    return hashlib.md5(query.lower().strip().encode()).hexdigest()
+# In-memory cache for connections 
+_cache = {"faiss": None, "dynamodb": None, "embeddings": None}
 
 
 def check_cache(query: str) -> dict | None:
     """
-    Check if similar query exists in cache.
+    Check if a similar question was asked before.
     Returns cached answer if found, None otherwise.
     """
     try:
-        cache_index = _get_cache_index()
-        if cache_index is None:
-            return None
+        # Step 1: Load FAISS index (contains query embeddings)
+        if _cache["faiss"] is None:
+            index_path = CACHE_INDEX_DIR / "index.faiss"
+            if not index_path.exists():
+                return None  # No cache exists yet
+            _cache["embeddings"] = OpenAIEmbeddings()
+            _cache["faiss"] = FAISS.load_local(
+                str(CACHE_INDEX_DIR), _cache["embeddings"], allow_dangerous_deserialization=True
+            )
         
-        # Search for similar queries
-        results = cache_index.similarity_search_with_score(query, k=1)
-        
+        # Step 2: Search for similar queries in FAISS
+        results = _cache["faiss"].similarity_search_with_score(query, k=1)
         if not results:
             return None
         
-        doc, score = results[0]
-        similarity = 1 - score  # FAISS returns distance, convert to similarity
-        
-        # Check if similar enough
+        # Step 3: Check if similarity is above threshold
+        # FAISS returns L2 distance. For normalized embeddings (OpenAI):
+        # - L2 distance 0 = identical (similarity 1.0)
+        # - L2 distance 2 = opposite (similarity 0.0)
+        # Formula: similarity = 1 - (distance / 2)
+        doc, distance = results[0]
+        similarity = max(0, 1 - (distance / 2))
         if similarity < SIMILARITY_THRESHOLD:
-            return None
+            return None  # Not similar enough
         
-        # Get answer from DynamoDB
+        # Step 4: Get the cached answer from DynamoDB
+        if _cache["dynamodb"] is None:
+            _cache["dynamodb"] = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE)
+        
         cache_key = doc.metadata.get("cache_key")
-        response = _get_dynamodb().get_item(Key={"cache_key": cache_key})
+        response = _cache["dynamodb"].get_item(Key={"cache_key": cache_key})
         
         if "Item" not in response:
             return None
         
-        item = response["Item"]
+        # Step 5: Return the cached answer (convert DynamoDB types to JSON-safe)
+        item = json.loads(json.dumps(response["Item"], default=str))
         return {
             "answer": item["answer"],
             "sources": item.get("sources", []),
             "cached": True,
             "similar_query": doc.page_content,
-            "similarity": round(similarity, 3)
+            "similarity": round(float(similarity), 3)
         }
         
     except Exception:
-        return None
+        return None  # On any error, treat as cache miss
 
 
 def save_to_cache(query: str, answer: str, contexts: list = None, sources: list = None):
     """
-    Save query-answer pair to cache.
-    
-    Also stores retrieved contexts for offline RAGAS evaluation.
-    DynamoDB entry can be exported for: question, contexts, answer → RAGAS
+    Save a new question-answer pair to cache.
+    Also stores contexts for offline RAGAS evaluation.
     """
     try:
-        cache_key = get_cache_key(query)
+        # Step 1: Generate cache key from query
+        cache_key = hashlib.md5(query.lower().strip().encode()).hexdigest()
         
-        # Save to DynamoDB (includes contexts for RAGAS evaluation)
-        _get_dynamodb().put_item(Item={
+        # Step 2: Save answer to DynamoDB
+        if _cache["dynamodb"] is None:
+            _cache["dynamodb"] = boto3.resource("dynamodb", region_name=AWS_REGION).Table(DYNAMODB_TABLE)
+        
+        _cache["dynamodb"].put_item(Item={
             "cache_key": cache_key,
             "query": query,
             "answer": answer,
-            "contexts": contexts or [],
+            "contexts": contexts or [],  # For RAGAS evaluation
             "sources": sources or [],
             "created_at": int(time.time()),
-            "ttl": int(time.time()) + (CACHE_TTL_HOURS * 3600)
+            "ttl": int(time.time()) + (CACHE_TTL_HOURS * 3600)  # Auto-expire
         })
         
-        # Save embedding to FAISS
-        cache_index = _get_cache_index()
-        from langchain_core.documents import Document
+        # Step 3: Save query embedding to FAISS
+        if _cache["embeddings"] is None:
+            _cache["embeddings"] = OpenAIEmbeddings()
+        
         doc = Document(page_content=query, metadata={"cache_key": cache_key})
         
-        if cache_index is None:
-            cache_index = FAISS.from_documents([doc], _get_embeddings())
+        if _cache["faiss"] is None:
+            # First entry - create new index
+            _cache["faiss"] = FAISS.from_documents([doc], _cache["embeddings"])
         else:
-            cache_index.add_documents([doc])
+            # Add to existing index
+            _cache["faiss"].add_documents([doc])
         
-        _save_cache_index(cache_index)
+        # Step 4: Save FAISS index to disk
+        CACHE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        _cache["faiss"].save_local(str(CACHE_INDEX_DIR))
         
     except Exception:
         pass  # Cache save failure shouldn't break the app

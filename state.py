@@ -16,7 +16,9 @@ class State(TypedDict):
         messages: List of messages in the conversation (auto-accumulated via add_messages)
         work: Dictionary to store intermediate results from agents
         steps: Counter for the number of orchestrator steps (max 5 to prevent infinite loops)
+        request_id: Unique ID for logging/tracing this request
     """
     messages: Annotated[list, add_messages]
     work: dict
     steps: int
+    request_id: str

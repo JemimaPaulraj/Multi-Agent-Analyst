@@ -3,11 +3,7 @@ RAG Agent - Reads PDFs from S3 bucket
 """
 
 import os
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from langsmith import traceable
 import boto3
@@ -20,8 +16,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from config import llm, get_logger
-from semantic_cache import check_cache, save_to_cache
+from agents.config import llm, get_logger
+from agents.semantic_cache import check_cache, save_to_cache
 
 logger = get_logger("rag")
 
@@ -32,7 +28,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Local cache for downloaded PDFs
 CACHE_DIR = Path(__file__).resolve().parent.parent / "s3_cache"
-VECTORSTORE_DIR = Path(__file__).resolve().parent.parent / "vectorstore"
+VECTORSTORE_DIR = Path(__file__).resolve().parent.parent / "FAISS_Vectorstore" / "RAG_index"
 
 # Session state
 _state = {"vectorstore": None, "s3_client": None}
@@ -90,7 +86,6 @@ def get_vectorstore():
     
     faiss_index = VECTORSTORE_DIR / "index.faiss"
     if faiss_index.exists():
-        logger.info("Loading vectorstore from disk")
         _state["vectorstore"] = FAISS.load_local(
             str(VECTORSTORE_DIR),
             OpenAIEmbeddings(),
@@ -141,7 +136,9 @@ def create_vectorstore():
     
     return _state["vectorstore"]
 
-
+# ------------------------------------------------------------------------------------------------#
+# RAG Agent Starts Here
+# ------------------------------------------------------------------------------------------------#
 @traceable(name="RAG Agent")
 def rag_agent(query: str) -> dict:
     """Use vectorstore to answer query with semantic caching."""
@@ -150,17 +147,16 @@ def rag_agent(query: str) -> dict:
         # Step 1: Check semantic cache first
         cached = check_cache(query)
         if cached:
-            logger.info(f"CACHE HIT | similarity={cached['similarity']} | similar_query={cached['similar_query'][:50]}...")
             return {
                 "agent": "rag_agent",
                 "query": query,
                 "answer": cached["answer"],
                 "sources": cached["sources"],
-                "cached": True
+                "cached": True,
+                "cache_similarity": cached.get("similarity")
             }
         
         # Step 2: Cache miss - do full RAG
-        logger.info("CACHE MISS | Running full RAG pipeline")
         
         vectorstore = get_vectorstore()
         if vectorstore is None:
@@ -182,8 +178,17 @@ def rag_agent(query: str) -> dict:
         prompt = ChatPromptTemplate.from_template(
             "Answer based on context. If unsure, say 'I don't know'.\n\nContext: {context}\n\nQuestion: {question}"
         )
-        chain = prompt | llm | StrOutputParser()
-        answer = chain.invoke({"context": context, "question": query})
+        
+        # Use llm.invoke() to get token usage
+        messages = prompt.format_messages(context=context, question=query)
+        response = llm.invoke(messages)
+        answer = response.content
+        
+        # Extract token usage
+        tokens_in, tokens_out = 0, 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            tokens_in = response.usage_metadata.get("input_tokens", 0)
+            tokens_out = response.usage_metadata.get("output_tokens", 0)
         
         sources = [
             {"source": Path(d.metadata.get("source", "")).name, "page": d.metadata.get("page", "")}
@@ -199,7 +204,9 @@ def rag_agent(query: str) -> dict:
             "query": query,
             "answer": answer,
             "sources": sources,
-            "cached": False
+            "cached": False,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out
         }
         
     except Exception as e:
