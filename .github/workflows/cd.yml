@@ -46,7 +46,7 @@ jobs:
       - name: Build and push image # Task4 (build and push the image to Amazon ECR)
         id: build
         # 1. If this workflow was triggered by a release, use the release version name as the tag, Otherwise, use the commit ID as the tag.
-        # 2. Set the image name.
+        # 2. Set the image name. 123456789012.dkr.ecr.us-east-1.amazonaws.com/multi-agent-analyst
         # 3. Build the image with the tag.
         # 4. Push the image to Amazon ECR.
         # 5. Output the tag to the GitHub Actions output. eg : steps.<step_id>.outputs.tag = v2.1.0
@@ -70,17 +70,23 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_SSH_USER }}
           key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          # 1. set -e : Exit the script if any command fails
+          # 2. IMAGE : The image to pull from ECR eg : 123456789012.dkr.ecr.us-east-1.amazonaws.com/multi-agent-analyst:v2.1.0
+          # 3. Log in to ECR : AWS gives a temporary ECR Login password, the docker inside EC2 can use this password to login to ECR.
+          # 4. docker pull "$IMAGE" : Pull the image from ECR
+          # 5. docker stop multi-agent-analyst 2>/dev/null || true : If the container already present, Stop the container if running.
+          # 6. docker rm multi-agent-analyst 2>/dev/null || true : Remove that existing container.
+          # 7. Run the new container with the image.
           script: |
             set -e
+            REGION=$(echo "${{ secrets.AWS_REGION }}" | tr -d '\n\r')
+            SECRET_ARN=$(echo "${{ secrets.MULTI_AGENT_SECRET_ARN }}" | tr -d '\n\r')
             IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}"
-            # Log in to ECR (EC2 instance role must allow ecr:GetAuthorizationToken)
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+            aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
             docker pull "$IMAGE"
-            # Stop and remove existing container if running
             docker stop multi-agent-analyst 2>/dev/null || true
             docker rm multi-agent-analyst 2>/dev/null || true
-            # Run new container with env vars for Secrets Manager
             docker run -d --name multi-agent-analyst --restart unless-stopped -p 8000:8000 \
-              -e MULTI_AGENT_SECRET_ARN="${{ secrets.MULTI_AGENT_SECRET_ARN }}" \
-              -e AWS_REGION="${{ secrets.AWS_REGION }}" \
+              -e MULTI_AGENT_SECRET_ARN="$SECRET_ARN" \
+              -e AWS_REGION="$REGION" \
               "$IMAGE"
