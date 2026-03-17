@@ -192,21 +192,8 @@ EventBridge (Weekly) → Lambda → SageMaker Training Job
 2. **CI passes** → CD builds Docker image
 3. **Push to ECR** → Deploy to EC2 via SSH
 
-### Manual Deployment
+<img width="3060" height="230" alt="image" src="https://github.com/user-attachments/assets/5244bc44-1dfe-4a44-a73f-118c1847c6f9" />
 
-```bash
-# Build and push to ECR
-docker build -t multi-agent-analyst .
-docker tag multi-agent-analyst:latest <account>.dkr.ecr.us-east-1.amazonaws.com/multi-agent-analyst:latest
-docker push <account>.dkr.ecr.us-east-1.amazonaws.com/multi-agent-analyst:latest
-
-# Deploy on EC2
-docker pull <account>.dkr.ecr.us-east-1.amazonaws.com/multi-agent-analyst:latest
-docker run -d -p 8000:8000 --name multi-agent-analyst \
-  -e AWS_REGION=us-east-1 \
-  -e MULTI_AGENT_SECRET_ARN=arn:aws:secretsmanager:... \
-  multi-agent-analyst:latest
-```
 
 ## Extending the System
 
