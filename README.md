@@ -55,6 +55,9 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
   - "Explain the troubleshooting steps for error code 404"
   - "What is the password reset policy?"
   - "How do I escalate a critical ticket?"
+    
+ <img width="3068" height="1574" alt="image" src="https://github.com/user-attachments/assets/c37c158f-18c5-4dbd-9553-6d59f475742a" />
+
 
 ### **DB Agent** (`agents/db.py`)
 - Natural language to SQL via LangChain SQL Agent
