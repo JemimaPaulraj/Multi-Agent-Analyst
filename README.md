@@ -192,8 +192,7 @@ EventBridge (Weekly) → Lambda → SageMaker Training Job
 2. **CI passes** → CD builds Docker image
 3. **Push to ECR** → Deploy to EC2 via SSH
 
-<img width="3060" height="230" alt="image" src="https://github.com/user-attachments/assets/5244bc44-1dfe-4a44-a73f-118c1847c6f9" />
-
+<img width="2461" height="364" alt="image" src="https://github.com/user-attachments/assets/a3b53d0b-5f83-47ee-a97f-12a772617720" />
 
 ## Extending the System
 
