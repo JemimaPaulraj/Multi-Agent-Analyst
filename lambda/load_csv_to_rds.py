@@ -25,4 +25,3 @@ df = pd.read_csv(CSV_FILE)
 df.to_sql("tickets", engine, if_exists="replace", index=False)
 
 print(f"Done! Loaded {len(df)} rows into 'tickets' table.")
-

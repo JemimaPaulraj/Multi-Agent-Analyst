@@ -5,12 +5,20 @@ from datetime import datetime
 from io import StringIO
 import boto3
 
+
+def log_structured(phase: str, **kwargs):
+    """One JSON line in CloudWatch only when running in Lambda (no-op when run locally)."""
+    if os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        payload = {"phase": phase, **kwargs}
+        print(json.dumps(payload))
+
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "ticket-forecasting-lake")
 ECR_IMAGE_URI = os.getenv("ECR_IMAGE_URI")
 SAGEMAKER_ROLE = os.getenv("SAGEMAKER_ROLE")
 ENDPOINT_NAME = os.getenv("ENDPOINT_NAME", "prophet-fastapi-endpoint-latest")
 MODEL_PACKAGE_GROUP = os.getenv("MODEL_PACKAGE_GROUP", "prophet-forecasting-models")
+SNS_TOPIC_ARN = os.getenv("SNS_TOPIC_ARN")
 MAPE_THRESHOLD = 20.0
 DRIFT_THRESHOLD = 0.5  # 50% change = drift
 
@@ -18,7 +26,45 @@ sm = boto3.client("sagemaker", region_name=AWS_REGION)
 s3 = boto3.client("s3", region_name=AWS_REGION)
 cloudwatch = boto3.client("cloudwatch", region_name=AWS_REGION)
 sns = boto3.client("sns", region_name=AWS_REGION)
-SNS_TOPIC_ARN = os.getenv("SNS_TOPIC_ARN", "")
+
+
+def _deploy_model_package(pkg_arn: str, run_id: str) -> dict:
+    """Create model + endpoint config and update (or create) endpoint. Used by retrain deploy and EventBridge deploy."""
+    
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    model_name = f"prophet-{ts}"
+    config_name = f"prophet-cfg-{ts}"
+    
+    log_structured("deploy_start", model_package_arn=pkg_arn, endpoint_name=ENDPOINT_NAME, request_id=run_id)
+
+    sm.create_model(ModelName=model_name, PrimaryContainer={"ModelPackageName": pkg_arn}, ExecutionRoleArn=SAGEMAKER_ROLE)
+    
+    # Create endpoint config with 2 instances.
+    initial_count = 2
+    sm.create_endpoint_config(
+        EndpointConfigName=config_name,
+        ProductionVariants=[{
+            "VariantName": "primary",
+            "ModelName": model_name,
+            "InstanceType": "ml.t2.medium",
+            "InitialInstanceCount": initial_count,
+        }],
+    )
+    deployment_config = {
+        "RollingUpdatePolicy": {
+            "MaximumBatchSize": {"Type": "INSTANCE_COUNT", "Value": 1},
+            "WaitIntervalInSeconds": 120,
+            "MaximumExecutionTimeoutInSeconds": 3600,
+        }
+    }
+    try:
+        sm.describe_endpoint(EndpointName=ENDPOINT_NAME)
+        sm.update_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=config_name, DeploymentConfig=deployment_config)
+    except sm.exceptions.ClientError:
+        sm.create_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=config_name)
+        log_structured("deploy_created", endpoint_name=ENDPOINT_NAME, request_id=run_id)
+
+    return {"status": "success", "action": "deploy_approved", "model_package_arn": pkg_arn, "endpoint_name": ENDPOINT_NAME}
 
 
 def get_new_data_stats():
@@ -76,14 +122,41 @@ def has_new_data():
 
 
 def lambda_handler(event, context):
-    """Check for new data → Check drift → Train → Register → Deploy."""
+    """Check for new data → Check drift → Train → Register → Deploy. Or: deploy on EventBridge approval / deploy_approved."""
+
+    # Lambda provides unique ID for each invocation, This can be used for tracing the request.
+    run_id = context.aws_request_id
+
+    # Log the raw event in structured form (visible in CloudWatch Logs).
+    log_structured("event", raw_event=event, request_id=run_id)
+
+    # Start the timer to track the duration of the pipeline and log it.
+    start_ts = time.time()
+    log_structured("pipeline_start", request_id=run_id)
+
+    # If it is a Weekly trigger, the event detail will be {"version": "0", "id": "some-uuid", "detail-type": "Scheduled Event", "source": "aws.events", "account": "123456789012", "time": "2026-03-01T09:00:00Z", "region": "us-east-1", "resources": ["arn:aws:events:us-east-1:123456789012:rule/weekly-prophet-retrain"], "detail": {}}.
+    # If it is a Approval trigger, the event will be {"version": "0", "id": "some-uuid", "detail-type": "SageMaker Model Package State Change", "source": "aws.sagemaker", "account": "123456789012", "time": "2026-02-28T21:15:30Z", "region": "us-east-1", "resources": ["arn:aws:sagemaker:us-east-1:123456789012:model-package/your-group-name/3"], "detail": {"ModelPackageGroupName": "prophet-forecasting-models","ModelPackageVersion": 3,"ModelPackageArn": "arn:aws:sagemaker:us-east-1:123456789012:model-package/prophet-forecasting-models/3","ModelPackageStatus": "Completed","ModelApprovalStatus": "Approved","CreationTime": "2026-02-28T21:15:30Z"}}.
+    detail = event.get("detail") or {}
     
+    if event.get("source") == "aws.sagemaker" and event.get("detail-type") == "SageMaker Model Package State Change":
+        pkg_arn = detail.get("ModelPackageArn")
+        approval_status = detail.get("ModelApprovalStatus")
+        
+        if approval_status == "Approved":
+            log_structured("deploy_approved_trigger", trigger="eventbridge", model_package_arn=pkg_arn, request_id=run_id)
+            result = _deploy_model_package(pkg_arn, run_id)
+            log_structured("pipeline_end", request_id=run_id, **result)
+            return result
+        return {"status": "skipped", "reason": "eventbridge_not_approved", "model_approval_status": approval_status}
+
     if not has_new_data():
+        log_structured("skip", reason="no_new_data", message="SKIP: no new data since last training", request_id=run_id)
         return {"status": "skipped", "reason": "no_new_data"}
-    
+
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     job_name = f"prophet-retrain-{ts}"
-    
+    log_structured("New_data_check", has_new_data=True, job_name=job_name, message="New data found, starting training job", request_id=run_id)
+
     # 0. Check drift
     new_y_mean = get_new_data_stats()
     old_stats = get_previous_stats()
@@ -91,6 +164,7 @@ def lambda_handler(event, context):
     
     # 0. Check drift (alert only, don't stop training)
     if is_drift(new_y_mean, old_y_mean):
+        log_structured("Data_drift", new_y_mean=new_y_mean, old_y_mean=old_y_mean, message=f"Data drift detected: new_mean={new_y_mean}, old_mean={old_y_mean}", request_id=run_id)
         cloudwatch.put_metric_data(Namespace="MLOps", MetricData=[{"MetricName": "DataDrift", "Value": 1}])
         if SNS_TOPIC_ARN:
             sns.publish(
@@ -106,6 +180,7 @@ def lambda_handler(event, context):
         pass
     
     # 2. Start training (train script reads bronze/, processes, trains)
+    log_structured("training_started", job_name=job_name, instance_type="ml.m5.large", message="Training started", request_id=run_id)
     sm.create_training_job(
         TrainingJobName=job_name,
         AlgorithmSpecification={"TrainingImage": ECR_IMAGE_URI, "TrainingInputMode": "File"},
@@ -122,8 +197,12 @@ def lambda_handler(event, context):
         status = job_info["TrainingJobStatus"]
         if status == "Completed":
             training_job_arn = job_info["TrainingJobArn"]
+            training_duration_sec = round(time.time() - start_ts, 2) if start_ts else None
+            log_structured("training_ended", job_name=job_name, status="Completed", training_job_arn=training_job_arn, duration_sec=training_duration_sec, message="Training ended", request_id=run_id)
             break
         if status in ["Failed", "Stopped"]:
+            failure_reason = job_info.get("FailureReason", "unknown")
+            log_structured("training_ended", job_name=job_name, status=status, failure_reason=failure_reason, message="Training ended", request_id=run_id)
             return {"status": "failed", "job": job_name}
         time.sleep(30)
     
@@ -134,6 +213,7 @@ def lambda_handler(event, context):
         metrics = {}
     mape = metrics.get("mape")
     approval = "Approved" if mape and mape < MAPE_THRESHOLD else "PendingManualApproval"
+    log_structured("metrics", job_name=job_name, mape=mape, rmse=metrics.get("rmse"), mae=metrics.get("mae"), approval=approval, threshold=MAPE_THRESHOLD, message=f"MAPE={mape}, approval={approval} (threshold={MAPE_THRESHOLD})", request_id=run_id)
     
     # Alert if manual approval needed
     if approval == "PendingManualApproval" and SNS_TOPIC_ARN:
@@ -144,7 +224,7 @@ def lambda_handler(event, context):
         )
     
     # 5. Register in Model Registry
-    pkg_params = {
+    pkg_params = { # Like a registration form that sagemaker will use to create new model version in the model registry
         "ModelPackageGroupName": MODEL_PACKAGE_GROUP,
         "InferenceSpecification": {
             "Containers": [{"Image": ECR_IMAGE_URI, "ModelDataUrl": f"s3://{S3_BUCKET}/Model/model.tar.gz"}],
@@ -154,7 +234,7 @@ def lambda_handler(event, context):
         },
         "ModelApprovalStatus": approval,
         "MetadataProperties": {
-            "GeneratedBy": training_job_arn
+            "GeneratedBy": training_job_arn # whenever you train a model in sagemaker. Sagemaker gives a unique ARN for that training job. Used for traceability.
         }
     }
     if mape:
@@ -187,25 +267,22 @@ def lambda_handler(event, context):
             "mae": str(metrics.get("mae", ""))
         }
     
+    # You register the model, Sagemaker creates a new model version in the model registry and it also returns its unique identifier stored in pkg_arn.
     pkg_arn = sm.create_model_package(**pkg_params)["ModelPackageArn"]
-    
+    model_data_url = f"s3://{S3_BUCKET}/Model/model.tar.gz"
+    log_structured("model_registered", job_name=job_name, model_package_arn=pkg_arn, model_data_url=model_data_url, approval=approval, request_id=run_id)
+
     # 6. Deploy if approved
     if approval == "Approved":
-        sm.create_model(ModelName=f"prophet-{ts}", PrimaryContainer={"ModelPackageName": pkg_arn}, ExecutionRoleArn=SAGEMAKER_ROLE)
-        sm.create_endpoint_config(EndpointConfigName=f"prophet-cfg-{ts}", ProductionVariants=[{"VariantName": "primary", "ModelName": f"prophet-{ts}", "InstanceType": "ml.t2.medium", "InitialInstanceCount": 1}])
-        
-        # Check if endpoint exists, create if not, update if exists
-        try:
-            sm.describe_endpoint(EndpointName=ENDPOINT_NAME)
-            # Endpoint exists, update it
-            sm.update_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=f"prophet-cfg-{ts}")
-        except sm.exceptions.ClientError:
-            # Endpoint doesn't exist, create it
-            sm.create_endpoint(EndpointName=ENDPOINT_NAME, EndpointConfigName=f"prophet-cfg-{ts}")
+        _deploy_model_package(pkg_arn, run_id)
+    else:
+        log_structured("deploy_skipped", reason="approval_not_approved", approval=approval, request_id=run_id)
     
     # 7. Save metadata + stats
     s3.put_object(Bucket=S3_BUCKET, Key="Model/last_trained.json", Body=json.dumps({"trained_at": datetime.utcnow().isoformat(), "mape": mape, "approval": approval}))
     if new_y_mean:
         save_stats(ts, new_y_mean)
-    
-    return {"status": "success", "job": job_name, "mape": mape, "approval": approval, "deployed": approval == "Approved"}
+
+    duration_sec = round(time.time() - start_ts, 2)
+    result = {"status": "success", "job": job_name, "mape": mape, "approval": approval, "deployed": approval == "Approved", "duration_sec": duration_sec}
+    return result

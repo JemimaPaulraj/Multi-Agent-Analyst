@@ -2,17 +2,6 @@
 Agents package for the Multi-Agent Analyst system.
 """
 
-import sys
-from pathlib import Path
-
-# Add paths for imports
-_parent = str(Path(__file__).parent.parent)
-_current = str(Path(__file__).parent)
-if _parent not in sys.path:
-    sys.path.insert(0, _parent)
-if _current not in sys.path:
-    sys.path.insert(0, _current)
-
 from agents.config import llm
 from agents.forecasting import forecasting_agent
 from agents.rag import rag_agent

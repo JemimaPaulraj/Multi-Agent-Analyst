@@ -11,10 +11,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code (see .dockerignore for exclusions)
-COPY main.py state.py graph.py schemas.py ./
+COPY app ./app
+COPY core ./core
 COPY agents ./agents
+COPY FAISS_Vectorstore ./FAISS_Vectorstore
 
 EXPOSE 8000
 
-# Run FastAPI with uvicorn (same as: uvicorn main:app --host 0.0.0.0 --port 8000)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run FastAPI with uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

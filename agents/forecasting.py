@@ -12,7 +12,7 @@ from langsmith import traceable
 import boto3
 from botocore.exceptions import ClientError
 
-from schemas import ForecastPayload
+from core.schemas import ForecastPayload
 from agents.config import get_logger
 
 logger = get_logger("forecasting")
@@ -21,7 +21,7 @@ logger = get_logger("forecasting")
 NY_TZ = ZoneInfo("America/New_York")
 
 # SageMaker Configuration
-SAGEMAKER_ENDPOINT = os.getenv("SAGEMAKER_ENDPOINT", "prophet-fastapi-endpoint-latest")
+SAGEMAKER_ENDPOINT = os.getenv("SAGEMAKER_ENDPOINT", "prophet-fastapi-endpoint")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Session state

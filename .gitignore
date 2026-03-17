@@ -12,14 +12,15 @@ __pycache__/
 
 # Caches
 FAISS_Vectorstore/
-vectorstore/
 s3_cache/
 cache_index/
 *.joblib
 
 # Secrets
+.secrets
 certs/
 *.pem
+.env
 
 # OS
 .DS_Store

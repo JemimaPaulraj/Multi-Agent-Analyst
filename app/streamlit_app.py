@@ -8,7 +8,7 @@ import streamlit as st
 import requests
 
 # Configuration - Use environment variable or default to localhost
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("MULTI_AGENT_ANALYST_API_URL", "http://localhost:8000")
 
 # Initialize session state for conversation memory
 if "session_id" not in st.session_state:

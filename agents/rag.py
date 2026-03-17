@@ -1,8 +1,11 @@
 """
-RAG Agent - Reads PDFs from S3 bucket
+RAG Agent - Reads PDFs from S3 bucket with built-in semantic cache.
 """
 
 import os
+import hashlib
+import time
+import json
 from pathlib import Path
 
 from langsmith import traceable
@@ -15,23 +18,30 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
 
 from agents.config import llm, get_logger
-from agents.semantic_cache import check_cache, save_to_cache
 
 logger = get_logger("rag")
 
-# S3 Configuration
+# S3 / AWS Configuration
 S3_BUCKET = os.getenv("S3_BUCKET", "ticket-forecasting-lake")
 S3_PREFIX = os.getenv("S3_PREFIX", "RAG_Data/")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Local cache for downloaded PDFs
+# Local cache for downloaded PDFs and vectorstores
 CACHE_DIR = Path(__file__).resolve().parent.parent / "s3_cache"
 VECTORSTORE_DIR = Path(__file__).resolve().parent.parent / "FAISS_Vectorstore" / "RAG_index"
 
-# Session state
+# Semantic cache configuration (FAISS + DynamoDB)
+CACHE_TABLE = os.getenv("CACHE_TABLE", "rag-semantic-cache")
+SIMILARITY_THRESHOLD = 0.85  # 0-1
+CACHE_TTL_HOURS = 24
+CACHE_INDEX_DIR = Path(__file__).resolve().parent.parent / "FAISS_Vectorstore" / "Cache_index"
+
+# In-memory state
 _state = {"vectorstore": None, "s3_client": None}
+_semantic_cache = {"faiss": None, "dynamodb": None, "embeddings": None}
 
 
 def get_s3_client():
@@ -39,6 +49,107 @@ def get_s3_client():
     if _state["s3_client"] is None:
         _state["s3_client"] = boto3.client("s3", region_name=AWS_REGION)
     return _state["s3_client"]
+
+
+def _check_semantic_cache(query: str) -> dict | None:
+    """
+    Check if a similar question was asked before using FAISS + DynamoDB.
+    Returns cached answer if found, None otherwise.
+    """
+    try:
+        # Load FAISS index (contains query embeddings)
+        if _semantic_cache["faiss"] is None:
+            index_path = CACHE_INDEX_DIR / "index.faiss"
+            if not index_path.exists():
+                return None
+            _semantic_cache["embeddings"] = OpenAIEmbeddings()
+            _semantic_cache["faiss"] = FAISS.load_local(
+                str(CACHE_INDEX_DIR),
+                _semantic_cache["embeddings"],
+                allow_dangerous_deserialization=True,
+            )
+
+        # Search for similar queries in FAISS
+        results = _semantic_cache["faiss"].similarity_search_with_score(query, k=1)
+        if not results:
+            return None
+
+        # Convert L2 distance to similarity in [0, 1]
+        doc, distance = results[0]
+        similarity = max(0, 1 - (distance / 2))
+        if similarity < SIMILARITY_THRESHOLD:
+            return None
+
+        # Get the cached answer from DynamoDB
+        if _semantic_cache["dynamodb"] is None:
+            _semantic_cache["dynamodb"] = boto3.resource(
+                "dynamodb", region_name=AWS_REGION
+            ).Table(CACHE_TABLE)
+
+        cache_key = doc.metadata.get("cache_key")
+        response = _semantic_cache["dynamodb"].get_item(Key={"cache_key": cache_key})
+        if "Item" not in response:
+            return None
+
+        item = json.loads(json.dumps(response["Item"], default=str))
+        return {
+            "answer": item["answer"],
+            "sources": item.get("sources", []),
+            "cached": True,
+            "similar_query": doc.page_content,
+            "similarity": round(float(similarity), 3),
+        }
+
+    except Exception:
+        return None
+
+
+def _save_to_semantic_cache(query: str, answer: str, contexts: list = None, sources: list = None):
+    """
+    Save a new question-answer pair to the semantic cache.
+    Also stores contexts for offline RAGAS evaluation.
+    """
+    try:
+        # Generate cache key from query
+        cache_key = hashlib.md5(query.lower().strip().encode()).hexdigest()
+
+        # Save answer to DynamoDB
+        if _semantic_cache["dynamodb"] is None:
+            _semantic_cache["dynamodb"] = boto3.resource(
+                "dynamodb", region_name=AWS_REGION
+            ).Table(CACHE_TABLE)
+
+        _semantic_cache["dynamodb"].put_item(
+            Item={
+                "cache_key": cache_key,
+                "query": query,
+                "answer": answer,
+                "contexts": contexts or [],
+                "sources": sources or [],
+                "created_at": int(time.time()),
+                "ttl": int(time.time()) + (CACHE_TTL_HOURS * 3600),
+            }
+        )
+
+        # Save query embedding to FAISS
+        if _semantic_cache["embeddings"] is None:
+            _semantic_cache["embeddings"] = OpenAIEmbeddings()
+
+        doc = Document(page_content=query, metadata={"cache_key": cache_key})
+
+        if _semantic_cache["faiss"] is None:
+            _semantic_cache["faiss"] = FAISS.from_documents(
+                [doc], _semantic_cache["embeddings"]
+            )
+        else:
+            _semantic_cache["faiss"].add_documents([doc])
+
+        CACHE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        _semantic_cache["faiss"].save_local(str(CACHE_INDEX_DIR))
+
+    except Exception:
+        # Cache failures must not break main RAG flow
+        pass
 
 
 def download_pdfs_from_s3():
@@ -145,7 +256,7 @@ def rag_agent(query: str) -> dict:
     
     try:
         # Step 1: Check semantic cache first
-        cached = check_cache(query)
+        cached = _check_semantic_cache(query)
         if cached:
             return {
                 "agent": "rag_agent",
@@ -197,7 +308,7 @@ def rag_agent(query: str) -> dict:
         
         # Step 3: Save to cache (includes contexts for RAGAS evaluation)
         contexts = [doc.page_content for doc in docs]
-        save_to_cache(query, answer, contexts, sources)
+        _save_to_semantic_cache(query, answer, contexts, sources)
         
         return {
             "agent": "rag_agent",

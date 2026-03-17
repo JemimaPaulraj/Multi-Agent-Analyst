@@ -6,7 +6,7 @@ Defines the LangGraph workflow structure.
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from state import State
+from core.state import State
 from agents import (
     orchestrator_node,
     call_forecasting_node,

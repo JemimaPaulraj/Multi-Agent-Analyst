@@ -1,7 +1,6 @@
 """
 RAGAS Evaluation (data from DynamoDB).
-Run from project root: python eval/run_ragas.py
-Or from eval/: python run_ragas.py
+Run from project root: python rag/eval/ragas_eval.py
 """
 
 import os
@@ -13,7 +12,7 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 logging.disable(logging.CRITICAL)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import json
 import math

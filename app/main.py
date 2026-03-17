@@ -41,8 +41,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from langsmith import traceable
-from state import State
-from graph import app as langgraph_app
+from core.state import State
+from core.graph import app as langgraph_app
 from agents.config import (
     get_logger, 
     log_metrics, 
@@ -203,7 +203,7 @@ def process_query(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
 
-# Run with: uvicorn main:app --reload
+# Run with: uvicorn app.main:app --reload
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

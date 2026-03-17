@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-# Add project root so we can import main, schemas, agents
+# Add project root so we can import app, core, agents
 _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -13,8 +13,8 @@ if str(_root) not in sys.path:
 from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
 
-from main import app
-from schemas import OrchestratorDecision, ForecastPayload
+from app.main import app
+from core.schemas import OrchestratorDecision, ForecastPayload
 from agents.orchestrator import orchestrator_node
 
 client = TestClient(app)
