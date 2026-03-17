@@ -36,14 +36,14 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
 
 ## Agents
 
-### **Orchestrator Agent**
+### **1. Orchestrator Agent**
 - Plans step-by-step to answer user queries
 - Routes to appropriate agents based on task type
 - Maintains conversation state via LangGraph checkpointer
 - Limits to 5 steps to prevent infinite loops
 - Tracks token usage and costs per request
 
-### **RAG Agent** (`agents/rag.py`)
+### **2. RAG Agent** (`agents/rag.py`)
 - Retrieves knowledge from PDF documents stored in S3
 - **Semantic Caching**: Similar queries return cached answers instantly
   - FAISS index stores query embeddings for similarity search
@@ -59,7 +59,7 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
  <img width="3068" height="1574" alt="image" src="https://github.com/user-attachments/assets/c37c158f-18c5-4dbd-9553-6d59f475742a" />
 
 
-### **DB Agent** (`agents/db.py`)
+### **3. DB Agent** (`agents/db.py`)
 - Natural language to SQL via LangChain SQL Agent
 - Queries MySQL database on AWS RDS
 - **Use cases:**
@@ -67,8 +67,11 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
   - "How many tickets were created last week?"
   - "Show ticket statistics from January 2026"
   - "What was the average resolution time yesterday?"
+ 
+<img width="3012" height="1524" alt="image" src="https://github.com/user-attachments/assets/562b6595-15b9-49e1-9c70-3b5d7c823846" />
 
-### **Forecasting Agent** (`agents/forecasting.py`)
+
+### **4. Forecasting Agent** (`agents/forecasting.py`)
 - Calls Prophet model deployed on SageMaker endpoint
 - Supports custom start dates and horizons
 - **Use cases:**
@@ -76,6 +79,11 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
   - "Predict ticket volume for next week"
   - "What will be the ticket count from March 1st for 7 days?"
   - "Estimate workload for the coming weekend"
+
+<img width="3054" height="1526" alt="image" src="https://github.com/user-attachments/assets/732b0117-8070-48bd-9d88-9a6b178e3268" />
+
+<img width="2566" height="274" alt="image" src="https://github.com/user-attachments/assets/e87782ed-8333-46d4-aedd-5c9580b9a387" />
+
 
 ## Project Structure
 
@@ -126,143 +134,6 @@ Multi-Agent-Analyst/
 └── README.md
 ```
 
-## Setup & Installation
-
-### Prerequisites
-
-- Python 3.10+
-- AWS Account with access to:
-  - Bedrock (Nova Pro model)
-  - S3, DynamoDB, RDS (MySQL)
-  - SageMaker, ECR, EC2
-  - Secrets Manager, CloudWatch
-- OpenAI API key (for embeddings)
-
-### 1. Clone & Create Virtual Environment
-
-```bash
-git clone https://github.com/your-username/Multi-Agent-Analyst.git
-cd Multi-Agent-Analyst
-
-# Create virtual environment
-python -m venv .venv
-
-# Activate (Windows)
-.venv\Scripts\activate
-
-# Activate (macOS/Linux)
-source .venv/bin/activate
-```
-
-### 2. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configure Environment Variables
-
-```bash
-# Copy example file
-cp .env.example .env
-```
-
-Edit `.env` with your credentials:
-
-```env
-# AWS Configuration
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-
-# LLM Configuration
-BEDROCK_MODEL_ID=amazon.nova-pro-v1:0
-OPENAI_API_KEY=sk-...                    # Required for embeddings
-
-# Database Configuration
-DB_HOST=your-rds-endpoint.amazonaws.com
-DB_USER=your-db-user
-DB_PASSWORD=your-db-password
-DB_NAME=ticket_database
-
-# S3 Configuration (for RAG documents)
-S3_BUCKET=your-bucket-name
-S3_PREFIX=RAG_Data/
-
-# SageMaker Configuration
-SAGEMAKER_ENDPOINT=prophet-fastapi-endpoint
-
-# Observability (Optional)
-LANGSMITH_API_KEY=ls-...
-LANGSMITH_PROJECT=multi-agent-analyst
-```
-
-### 4. Run the Application
-
-**Option A: FastAPI Backend Only**
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-**Option B: Streamlit Frontend**
-```bash
-streamlit run app/streamlit_app.py
-```
-
-**Option C: Both (separate terminals)**
-```bash
-# Terminal 1 - Backend
-uvicorn app.main:app --reload --port 8000
-
-# Terminal 2 - Frontend
-streamlit run app/streamlit_app.py
-```
-
-### 5. Verify Installation
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Run tests
-pytest tests/ -v
-```
-
-## API Usage
-
-### Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check |
-| `POST` | `/query` | Process query through multi-agent system |
-
-### Example Request
-
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Forecast tickets for next 3 days",
-    "session_id": "user-123"
-  }'
-```
-
-### Example Response
-
-```json
-{
-  "query": "Forecast tickets for next 3 days",
-  "answer": "Based on the forecast, expected ticket counts are: 2026-02-26: 45, 2026-02-27: 52, 2026-02-28: 48",
-  "work": {
-    "forecast_result": {...},
-    "tokens_in": 1250,
-    "tokens_out": 180
-  },
-  "steps": 2
-}
-```
-
 ## MLOps Pipeline
 
 ### Weekly Retraining Flow
@@ -283,6 +154,8 @@ EventBridge (Weekly) → Lambda → SageMaker Training Job
                                               EventBridge → Lambda → Deploy
 ```
 
+<img width="2438" height="876" alt="image" src="https://github.com/user-attachments/assets/8871fd00-f768-45e1-bfa3-16ba9754465e" />
+
 ### Key Features
 
 - **Data Drift Detection**: Alerts when input data distribution changes
@@ -297,6 +170,9 @@ EventBridge (Weekly) → Lambda → SageMaker Training Job
 - Per-agent metrics (latency, tokens, cost)
 - Error logging with stack traces
 
+<img width="3028" height="1414" alt="image" src="https://github.com/user-attachments/assets/dac6badd-8013-4b29-a71f-26d6ffce5601" />
+
+
 ### CloudWatch Metrics
 - `Latency`, `TokensIn`, `TokensOut`, `Cost`, `Steps`
 - `ErrorCount` with Agent dimension
@@ -304,18 +180,9 @@ EventBridge (Weekly) → Lambda → SageMaker Training Job
 
 ### LangSmith
 - Full LLM tracing via `@traceable` decorators
-- Token usage tracking
-- Prompt/completion inspection
 
-## Testing
+<img width="3072" height="1568" alt="image" src="https://github.com/user-attachments/assets/4f4118f2-fe2d-4ac2-847e-827da7551015" />
 
-```bash
-# Run all tests
-pytest tests/ -v
-
-# Run specific test
-pytest tests/test_app.py::test_health -v
-```
 
 ## Deployment
 
@@ -369,14 +236,3 @@ docker run -d -p 8000:8000 --name multi-agent-analyst \
 | Bedrock (Nova Pro) | ~$0.001/request |
 | **Total** | **~$100/month** |
 
-## License
-
-MIT License
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests: `pytest tests/ -v`
-5. Submit a pull request
