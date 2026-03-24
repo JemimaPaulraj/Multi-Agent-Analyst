@@ -4,7 +4,7 @@ A production-ready multi-agent system built with **LangGraph** that orchestrates
 
 ## Architecture
 
-![architecture](https://github.com/user-attachments/assets/67b96cf0-b342-46b2-9518-2b19e5345351)
+![architecture (3)](https://github.com/user-attachments/assets/b1feb556-fb93-4119-8eec-f53060f67ef8)
 
 ## Key Features
 
